@@ -66,13 +66,14 @@ export default function SmartCanDashboard() {
     return Math.round(fillPercent)
   }
 
-  const getGasStatus = (ppm: number | null) => {
-    if (ppm === null) return { label: "Unknown", color: "text-muted-foreground" }
-    if (ppm < 200) return { label: "Good", color: "text-primary" }
-    if (ppm < 400) return { label: "Moderate", color: "text-accent-foreground" }
-    return { label: "High", color: "text-destructive" }
-  }
-
+ 
+const getGasStatus = (ppm: number | null) => {
+  if (ppm === null) return { label: "Unknown", color: "text-muted-foreground" }
+  if (ppm <= 300) return { label: "Normal", color: "text-green-500" }
+  if (ppm <= 500) return { label: "Moderate", color: "text-yellow-500" }
+  if (ppm <= 700) return { label: "High", color: "text-orange-500" }
+  return { label: "Danger", color: "text-red-500" }
+}
   const fillLevel = getFillLevel(sensorData?.distance_cm ?? null)
   const gasStatus = getGasStatus(sensorData?.gas_ppm ?? null)
 
@@ -110,6 +111,7 @@ export default function SmartCanDashboard() {
             type="fill"
             fillPercent={fillLevel}
           />
+          
 
           <div className="grid grid-cols-2 gap-4">
             <SensorCard
@@ -126,13 +128,15 @@ export default function SmartCanDashboard() {
               gasLevel={sensorData?.gas_ppm ?? 0}
             />
 
-            <SensorCard
-              title="LED Status"
-              value={loading ? "--" : sensorData?.led_status ?? "Off"}
-              subtitle="Indicator light"
-              type="led"
-              ledStatus={sensorData?.led_status ?? "off"}
-            />
+         <SensorCard
+  title="LED Status"
+  value={loading ? "--" : (sensorData?.led_status ?? "Off").replace("_", " ").toUpperCase()}
+  subtitle="Indicator light"
+  type="led"
+  ledStatus={sensorData?.led_status ?? "off"}
+/>
+
+          
           </div>
         </div>
 
