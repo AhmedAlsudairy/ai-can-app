@@ -1,9 +1,12 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { createClient } from "@/lib/supabase/client"
 import { SensorCard } from "@/components/sensor-card"
 import { StatusHeader } from "@/components/status-header"
+import { FillChart } from "@/components/fill-chart"
+import { GasChart } from "@/components/gas-chart"
+import { AiInsights } from "@/components/ai-insights"
 import { Badge } from "@/components/ui/badge"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import {
@@ -17,8 +20,9 @@ import {
 import { Trash2 } from "lucide-react"
 
 // Match ESP32 constants
-const MAX_DISTANCE = 30 // cm — empty can
-const MIN_DISTANCE = 3  // cm — full can
+const MAX_DISTANCE = 30
+const MIN_DISTANCE = 3
+const PAGE_SIZE = 20
 
 interface SensorData {
   id: number
@@ -54,37 +58,54 @@ function ledBadgeVariant(
 }
 
 export default function SmartCanDashboard() {
+  const supabase = useMemo(() => createClient(), [])
+
   const [latest, setLatest] = useState<SensorData | null>(null)
+  // records: newest-first (for table)
   const [records, setRecords] = useState<SensorData[]>([])
+  // chartData: oldest-first (for time-series charts)
+  const [chartData, setChartData] = useState<SensorData[]>([])
   const [loading, setLoading] = useState(true)
-  const supabase = createClient()
+  const [loadingMore, setLoadingMore] = useState(false)
+  const [hasMore, setHasMore] = useState(true)
 
-  const fetchData = async () => {
-    const { data, error } = await supabase
-      .from("sensor_data")
-      .select("*")
-      .order("created_at", { ascending: false })
-      .limit(20)
+  const tableOffsetRef = useRef(0)
+  const sentinelRef = useRef<HTMLDivElement>(null)
 
-    if (!error && data && data.length > 0) {
-      setLatest(data[0])
-      setRecords(data)
-    }
-    setLoading(false)
-  }
-
+  // ── Initial load ──────────────────────────────────────
   useEffect(() => {
-    fetchData()
+    const init = async () => {
+      const { data } = await supabase
+        .from("sensor_data")
+        .select("*")
+        .order("created_at", { ascending: false })
+        .limit(50)
 
+      if (data && data.length > 0) {
+        setLatest(data[0])
+        setRecords(data)
+        setChartData([...data].reverse())
+        tableOffsetRef.current = data.length
+        if (data.length < 50) setHasMore(false)
+      }
+      setLoading(false)
+    }
+    init()
+  }, [supabase])
+
+  // ── Realtime subscription ─────────────────────────────
+  useEffect(() => {
     const channel = supabase
       .channel("sensor_data_changes")
       .on(
         "postgres_changes",
         { event: "INSERT", schema: "public", table: "sensor_data" },
         (payload) => {
-          const newRow = payload.new as SensorData
-          setLatest(newRow)
-          setRecords((prev) => [newRow, ...prev.slice(0, 19)])
+          const row = payload.new as SensorData
+          setLatest(row)
+          setRecords((prev) => [row, ...prev])
+          setChartData((prev) => [...prev.slice(-49), row])
+          tableOffsetRef.current += 1
         }
       )
       .subscribe()
@@ -92,6 +113,43 @@ export default function SmartCanDashboard() {
     return () => {
       supabase.removeChannel(channel)
     }
+  }, [supabase])
+
+  // ── Load more (pagination) ────────────────────────────
+  const loadMore = useCallback(async () => {
+    if (loadingMore || !hasMore) return
+    setLoadingMore(true)
+    const offset = tableOffsetRef.current
+    const { data } = await supabase
+      .from("sensor_data")
+      .select("*")
+      .order("created_at", { ascending: false })
+      .range(offset, offset + PAGE_SIZE - 1)
+
+    if (data) {
+      setRecords((prev) => [...prev, ...data])
+      tableOffsetRef.current = offset + data.length
+      if (data.length < PAGE_SIZE) setHasMore(false)
+    }
+    setLoadingMore(false)
+  }, [supabase, loadingMore, hasMore])
+
+  // keep ref in sync so IntersectionObserver always calls latest version
+  const loadMoreRef = useRef(loadMore)
+  loadMoreRef.current = loadMore
+
+  // ── Infinite scroll via IntersectionObserver ──────────
+  useEffect(() => {
+    const el = sentinelRef.current
+    if (!el) return
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0].isIntersecting) loadMoreRef.current()
+      },
+      { rootMargin: "300px" }
+    )
+    observer.observe(el)
+    return () => observer.disconnect()
   }, [])
 
   const fillLevel = getFillPercent(latest?.distance_cm ?? null)
@@ -114,6 +172,7 @@ export default function SmartCanDashboard() {
 
         <StatusHeader loading={loading} lastUpdated={latest?.created_at ?? null} />
 
+        {/* Sensor cards */}
         <div className="mt-6 grid gap-4">
           <SensorCard
             title="Fill Level"
@@ -143,7 +202,6 @@ export default function SmartCanDashboard() {
               type="gas"
               gasLevel={latest?.gas_ppm ?? 0}
             />
-
             <SensorCard
               title="LED Status"
               value={
@@ -160,11 +218,31 @@ export default function SmartCanDashboard() {
           </div>
         </div>
 
-        {/* Records Table */}
+        {/* Charts */}
+        {chartData.length > 1 && (
+          <div className="mt-8 grid gap-4">
+            <FillChart data={chartData} />
+            <GasChart data={chartData} />
+          </div>
+        )}
+
+        {/* AI Insights */}
+        {chartData.length >= 3 && (
+          <div className="mt-4">
+            <AiInsights data={chartData} />
+          </div>
+        )}
+
+        {/* Records Table with infinite scroll */}
         <Card className="mt-8 border-border/50 shadow-sm">
           <CardHeader className="pb-3">
             <CardTitle className="text-base font-semibold">
-              Recent Records
+              Records
+              {records.length > 0 && (
+                <span className="ml-2 text-xs font-normal text-muted-foreground">
+                  {records.length} loaded
+                </span>
+              )}
             </CardTitle>
           </CardHeader>
           <CardContent className="p-0">
@@ -218,9 +296,7 @@ export default function SmartCanDashboard() {
                           : "—"}
                       </TableCell>
                       <TableCell>
-                        {row.gas_ppm != null
-                          ? row.gas_ppm.toFixed(0)
-                          : "—"}
+                        {row.gas_ppm != null ? row.gas_ppm.toFixed(0) : "—"}
                       </TableCell>
                       <TableCell className="pr-5">
                         <Badge variant={ledBadgeVariant(row.led_status)}>
@@ -232,6 +308,21 @@ export default function SmartCanDashboard() {
                 )}
               </TableBody>
             </Table>
+
+            {/* Infinite scroll sentinel + status */}
+            <div
+              ref={sentinelRef}
+              className="flex items-center justify-center py-4"
+            >
+              {loadingMore && (
+                <div className="h-5 w-5 animate-spin rounded-full border-2 border-primary border-t-transparent" />
+              )}
+              {!hasMore && records.length > 0 && (
+                <p className="text-xs text-muted-foreground">
+                  All {records.length} records loaded
+                </p>
+              )}
+            </div>
           </CardContent>
         </Card>
 
